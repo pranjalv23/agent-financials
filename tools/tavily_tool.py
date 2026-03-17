@@ -17,7 +17,7 @@ def _get_client() -> TavilyClient:
     return _tavily_client
 
 
-def _tavily_search_sync(query: str, max_results: int = 5) -> List[Dict[str, Any]]:
+def _tavily_search_sync(query: str, max_results: int = 3) -> List[Dict[str, Any]]:
     logger.info("Tavily search — query='%s', max_results=%d", query, max_results)
     try:
         client = _get_client()
@@ -38,8 +38,8 @@ def _tavily_search_sync(query: str, max_results: int = 5) -> List[Dict[str, Any]
         return [{"error": f"Search failed: {str(e)}"}]
 
 
-@tool("tavily_quick_search", return_direct=True)
-async def tavily_quick_search(query: str, max_results: int = 5) -> List[Dict[str, Any]]:
+@tool("tavily_quick_search")
+async def tavily_quick_search(query: str, max_results: int = 3) -> List[Dict[str, Any]]:
     """
     Perform a quick and generalized web search across the internet to answer questions.
     Ideal for 'How to invest', 'Where to start', broad concepts, or current news.

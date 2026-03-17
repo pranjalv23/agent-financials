@@ -23,7 +23,7 @@ def _firecrawl_scrape_sync(url: str) -> Dict[str, Any]:
         app = _get_app()
         # Using scrape_url for deep single-page extraction
         # Alternatively, crawl_url could be exposed if recursive scraping is needed
-        scrape_result = app.scrape_url(url, params={'formats': ['markdown']})
+        scrape_result = app.scrape(url, formats=['markdown'])
         
         return {
             "url": url,
@@ -35,7 +35,7 @@ def _firecrawl_scrape_sync(url: str) -> Dict[str, Any]:
         return {"error": f"Scrape failed for {url}. Error: {str(e)}"}
 
 
-@tool("firecrawl_deep_scrape", return_direct=True)
+@tool("firecrawl_deep_scrape")
 async def firecrawl_deep_scrape(url: str) -> Dict[str, Any]:
     """
     Perform a deep, comprehensive scrape of a single specific URL to extract its full markdown content.

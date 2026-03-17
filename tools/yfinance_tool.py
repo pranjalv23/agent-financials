@@ -28,7 +28,7 @@ def _get_ticker_data_sync(ticker: str) -> Dict[str, Any]:
         return {"error": f"Failed to fetch data for {ticker}. Error: {str(e)}"}
 
 
-@tool("get_ticker_data", return_direct=True)
+@tool("get_ticker_data")
 async def get_ticker_data(ticker: str) -> Dict[str, Any]:
     """
     Get basic market data and company information for a given ticker symbol.

@@ -27,8 +27,13 @@ def get_memories(user_id: str, query: str) -> list[str]:
     """
     try:
         client = _get_client()
-        results = client.search(query=query, user_id=user_id, limit=10)
-        memories = [r["memory"] for r in results if r.get("memory")]
+        results = client.search(
+            query=query,
+            version="v2",
+            filters={"user_id": user_id},
+            limit=10,
+        )
+        memories = [r["memory"] for r in results.get("results", []) if r.get("memory")]
         if memories:
             logger.info("Retrieved %d memories for user='%s'", len(memories), user_id)
         else:

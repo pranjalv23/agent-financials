@@ -98,6 +98,7 @@ def get_agent() -> BaseAgent:
                 get_bse_nse_reports,
             ],
             system_prompt=SYSTEM_PROMPT,
+            provider="nvidia",
         )
     return _agent_instance
 

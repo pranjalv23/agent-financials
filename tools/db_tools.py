@@ -10,7 +10,7 @@ from tools.bse_nse_reports import _get_financial_reports_sync
 logger = logging.getLogger("agent_financials.db_tools")
 
 
-@tool("check_reports_in_db", return_direct=True)
+@tool("check_reports_in_db")
 async def check_reports_in_db(ticker: str) -> Dict[str, Any]:
     """
     Check if financial reports for a given ticker already exist in the vector database.
@@ -55,7 +55,7 @@ def _add_reports_to_db_sync(ticker: str) -> Dict[str, Any]:
         return {"status": "error", "message": f"Database error: {str(e)}"}
 
 
-@tool("add_reports_to_db", return_direct=True)
+@tool("add_reports_to_db")
 async def add_reports_to_db(ticker: str) -> Dict[str, Any]:
     """
     Fetch quarterly and yearly reports for a given ticker and add them to the vector database for later semantic retrieval.
@@ -75,7 +75,7 @@ def _retrieve_reports_sync(query: str, ticker: str = None, top_k: int = 5) -> Li
         return [{"error": f"Retrieval failed: {str(e)}"}]
 
 
-@tool("retrieve_reports_from_db", return_direct=True)
+@tool("retrieve_reports_from_db")
 async def retrieve_reports_from_db(query: str, ticker: str = None, top_k: int = 5) -> List[Dict[str, Any]]:
     """
     Retrieve relevant financial report chunks from the vector database using semantic search.
