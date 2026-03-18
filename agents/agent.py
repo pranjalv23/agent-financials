@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime, timezone
 
 from agent_sdk.agents import BaseAgent
 from tools.yfinance_tool import get_ticker_data
@@ -109,16 +110,27 @@ async def run_query(query: str, session_id: str = "default") -> dict:
     # --- Layer 3: Fetch long-term memories from Mem0 ---
     memories = get_memories(user_id=session_id, query=query)
 
+    # Inject the current date so the LLM grounds all searches in the right timeframe
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    date_block = (
+        f"\n\nTODAY'S DATE: {today}\n"
+        "Always use this date as your reference for 'current', 'recent', 'latest', etc. "
+        "When searching with tavily_quick_search, include the current year ({year}) in your "
+        "search queries to ensure you get up-to-date results (e.g., 'HDFC Bank Q4 {year} results' "
+        "instead of just 'HDFC Bank Q4 results').".format(year=datetime.now(timezone.utc).year)
+    )
+
     # Dynamically enrich the system prompt with any known user context
     if memories:
         memory_block = "\n".join(f"- {m}" for m in memories)
         enriched_prompt = (
             SYSTEM_PROMPT
+            + date_block
             + f"\n\nCONTEXT ABOUT THIS USER (from long-term memory, use this to personalize your response):\n{memory_block}"
         )
         logger.info("Injected %d memories into system_prompt for session='%s'", len(memories), session_id)
     else:
-        enriched_prompt = SYSTEM_PROMPT
+        enriched_prompt = SYSTEM_PROMPT + date_block
 
     # --- Run the singleton agent (checkpointer persists across calls per session) ---
     agent = get_agent()
