@@ -15,6 +15,7 @@ dependencies = [
     "a2a-sdk (>=0.2.0)",
     "langchain-mcp-adapters (>=0.1.0)",
     "langgraph-checkpoint-mongodb (>=0.3.1)",
+    "agent-sdk @ git+https://github.com/pranjalv23/agent-sdk.git@v0.1.1",
 ]
 
 
