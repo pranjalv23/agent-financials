@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 from agents.agent import get_agent, run_query, stream_query
 from database.mongo import MongoDB
-from a2a.server import create_a2a_app
+from a2a_service.server import create_a2a_app
 
 logging.basicConfig(
     level=logging.INFO,
