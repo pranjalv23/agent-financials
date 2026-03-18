@@ -8,7 +8,6 @@ authors = [
 readme = "README.md"
 requires-python = ">=3.13,<4.0"
 dependencies = [
-    "agent-sdk @ file:///Users/pranjalverma/Documents/agent-financials/agent-sdk",
     "motor (>=3.7.1,<4.0.0)",
     "fastapi (>=0.135.1,<0.136.0)",
     "uvicorn[standard] (>=0.42.0,<0.43.0)",
@@ -27,4 +26,4 @@ build-backend = "poetry.core.masonry.api"
 package-mode = false
 
 [tool.poetry.dependencies]
-agent-sdk = {develop = true}
+agent-sdk = { path = "./agent-sdk", develop = true }
