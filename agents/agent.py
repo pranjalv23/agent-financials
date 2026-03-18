@@ -1,4 +1,5 @@
 import logging
+import os
 from datetime import datetime, timezone
 
 from langgraph.checkpoint.mongodb.aio import AsyncMongoDBSaver
@@ -80,15 +81,15 @@ SYSTEM_PROMPT = (
 # MCP server configuration — tools are served remotely via MCP protocol
 MCP_SERVERS = {
     "web-search": {
-        "url": "http://localhost:8010/mcp",
+        "url": os.getenv("MCP_WEB_SEARCH_URL", "http://localhost:8010/mcp"),
         "transport": "streamable_http",
     },
     "finance-data": {
-        "url": "http://localhost:8011/mcp",
+        "url": os.getenv("MCP_FINANCE_DATA_URL", "http://localhost:8011/mcp"),
         "transport": "streamable_http",
     },
     "vector-db": {
-        "url": "http://localhost:8012/mcp",
+        "url": os.getenv("MCP_VECTOR_DB_URL", "http://localhost:8012/mcp"),
         "transport": "streamable_http",
     },
 }

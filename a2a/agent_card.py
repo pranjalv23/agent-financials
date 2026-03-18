@@ -1,3 +1,5 @@
+import os
+
 from a2a.types import AgentCard, AgentSkill, AgentCapabilities
 
 
@@ -8,7 +10,7 @@ FINANCIAL_AGENT_CARD = AgentCard(
         "fetches real-time market data, interprets financial statements, "
         "and provides actionable investment insights for Indian BSE/NSE and global markets."
     ),
-    url="http://localhost:9001",
+    url=os.getenv("AGENT_PUBLIC_URL", "http://localhost:9001"),
     version="1.0.0",
     skills=[
         AgentSkill(
