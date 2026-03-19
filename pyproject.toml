@@ -15,6 +15,7 @@ dependencies = [
     "a2a-sdk (>=0.2.0)",
     "langchain-mcp-adapters (>=0.1.0)",
     "langgraph-checkpoint-mongodb (>=0.3.1)",
+    "agent-sdk (>=0.1.0)",
 ]
 
 
@@ -26,4 +27,4 @@ build-backend = "poetry.core.masonry.api"
 package-mode = false
 
 [tool.poetry.dependencies]
-agent-sdk = { path = "./agent-sdk", develop = true }
+agent-sdk = { git = "https://github.com/pranjalv23/agent-sdk.git", tag = "v0.1.3" }

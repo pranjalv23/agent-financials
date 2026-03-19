@@ -77,18 +77,10 @@ SYSTEM_PROMPT = (
     "Always ground your opinions in data — never give baseless recommendations."
 )
 
-# MCP server configuration — tools are served remotely via MCP protocol
+# MCP server configuration — all tools served from a single combined MCP server
 MCP_SERVERS = {
-    "web-search": {
-        "url": os.getenv("MCP_WEB_SEARCH_URL", "http://localhost:8010/mcp"),
-        "transport": "streamable_http",
-    },
-    "finance-data": {
-        "url": os.getenv("MCP_FINANCE_DATA_URL", "http://localhost:8011/mcp"),
-        "transport": "streamable_http",
-    },
-    "vector-db": {
-        "url": os.getenv("MCP_VECTOR_DB_URL", "http://localhost:8012/mcp"),
+    "mcp-tool-servers": {
+        "url": os.getenv("MCP_SERVER_URL", "http://localhost:8010/mcp"),
         "transport": "streamable_http",
     },
 }
