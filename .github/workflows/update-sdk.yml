@@ -20,6 +20,10 @@ jobs:
           git fetch --tags
           git checkout ${{ github.event.client_payload.tag }}
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
       - name: Install Poetry
         run: pip install poetry
 
