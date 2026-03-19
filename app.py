@@ -116,6 +116,12 @@ async def ask_stream(request: AskRequest):
 
         # Save to MongoDB with steps tracked during streaming
         response_text = "".join(full_response)
+
+        if not response_text.strip():
+            fallback = "Sorry, the model returned an empty response. Please try again or switch to a different model."
+            yield f"data: {json.dumps({'text': fallback})}\n\n"
+            response_text = fallback
+
         from agents.agent import save_memory
         save_memory(user_id=session_id, query=request.query, response=response_text)
 
