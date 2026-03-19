@@ -23,7 +23,7 @@ class FinancialAgentExecutor(AgentExecutor):
         query = context.get_user_input()
         if not query:
             logger.error("No text content found in the request")
-            event_queue.enqueue_event(
+            await event_queue.enqueue_event(
                 task_id=context.task_id,
                 state=TaskState.failed,
                 parts=[TextPart(text="No text content found in the request.")],
@@ -36,14 +36,14 @@ class FinancialAgentExecutor(AgentExecutor):
             result = await run_query(query, session_id=session_id)
             response_text = result["response"]
 
-            event_queue.enqueue_event(
+            await event_queue.enqueue_event(
                 task_id=context.task_id,
                 state=TaskState.completed,
                 parts=[TextPart(text=response_text)],
             )
         except Exception as e:
             logger.error("A2A execution failed: %s\n%s", e, traceback.format_exc())
-            event_queue.enqueue_event(
+            await event_queue.enqueue_event(
                 task_id=context.task_id,
                 state=TaskState.failed,
                 parts=[TextPart(text=f"Agent execution failed: {e}")],
