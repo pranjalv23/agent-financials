@@ -122,12 +122,13 @@ RESPONSE_FORMAT_INSTRUCTIONS = {
         "Skip detailed section headers, long explanations, and tables."
     ),
     "flash_cards": (
-        "\n\nRESPONSE FORMAT OVERRIDE: The user wants FLASH CARDS. "
-        "Format your entire response as a series of flash cards using this format:\n"
-        "**Q:** [question about a key concept/metric]\n"
-        "**A:** [concise answer with the data point and what it means]\n\n"
-        "Generate 8-12 flash cards covering the most important financial metrics, "
-        "risks, strengths, and the bottom-line investment view."
+        "\n\nRESPONSE FORMAT OVERRIDE: The user wants INSIGHT CARDS. "
+        "Format your response as a series of insight cards using this exact format for each card:\n\n"
+        "### [Topic Label]\n"
+        "**Key Insight:** [The main metric, data point, or finding — keep it short and prominent]\n"
+        "[1-2 sentence explanation of what this means and why it matters]\n\n"
+        "Generate 8-12 cards covering: key financial metrics, valuation, strengths, risks, "
+        "growth prospects, and a bottom-line view."
     ),
     "detailed": "",  # default — uses the full system prompt format as-is
 }
