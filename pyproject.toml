@@ -27,4 +27,4 @@ build-backend = "poetry.core.masonry.api"
 package-mode = false
 
 [tool.poetry.dependencies]
-agent-sdk = { git = "https://github.com/pranjalv23/agent-sdk.git", tag = "v0.1.21" }
+agent-sdk = { git = "https://github.com/pranjalv23/agent-sdk.git", tag = "v0.1.22" }
