@@ -6,7 +6,7 @@ authors = [
     {name = "None"}
 ]
 readme = "README.md"
-requires-python = ">=3.13,<4.0"
+requires-python = ">=3.13,<3.13.12"
 dependencies = [
     "motor (>=3.7.1,<4.0.0)",
     "fastapi (>=0.135.1,<0.136.0)",
