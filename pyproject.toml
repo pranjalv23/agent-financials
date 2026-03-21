@@ -16,6 +16,7 @@ dependencies = [
     "langchain-mcp-adapters (>=0.1.0)",
     "langgraph-checkpoint-mongodb (>=0.3.1)",
     "agent-sdk (>=0.1.0)",
+    "qdrant-client (<1.17.1)",
 ]
 
 
