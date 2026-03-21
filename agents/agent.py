@@ -80,8 +80,8 @@ SYSTEM_PROMPT = (
 # MCP server configuration — all tools served from a single combined MCP server
 MCP_SERVERS = {
     "mcp-tool-servers": {
-        "url": os.getenv("MCP_SERVER_URL", "http://localhost:8010/mcp"),
-        "transport": "streamable_http",
+        "url": os.getenv("MCP_SERVER_URL", "http://localhost:8010/sse"),
+        "transport": "sse",
     },
 }
 
