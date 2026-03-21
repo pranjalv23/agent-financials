@@ -107,7 +107,7 @@ def get_agent(mode: str = "financial_analyst") -> BaseAgent:
             tools=[],
             mcp_servers=MCP_SERVERS,
             system_prompt=SYSTEM_PROMPT,
-            provider="nvidia",
+            provider="azure",
             checkpointer=_get_checkpointer(),
             mode=mode,
         )
