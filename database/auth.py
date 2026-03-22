@@ -3,15 +3,13 @@ import os
 import uuid
 from datetime import datetime, timezone
 
+import bcrypt
 from motor.motor_asyncio import AsyncIOMotorClient
-from passlib.context import CryptContext
 
 logger = logging.getLogger("agent_financials.auth")
 
 _MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 _AUTH_DB = "agent_auth"  # shared across all agents
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 class AuthDB:
@@ -32,7 +30,7 @@ class AuthDB:
         user = {
             "user_id": uuid.uuid4().hex,
             "email": email.lower().strip(),
-            "password_hash": pwd_context.hash(password),
+            "password_hash": bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode(),
             "created_at": datetime.now(timezone.utc),
         }
         await cls._collection().insert_one(user)
@@ -47,4 +45,4 @@ class AuthDB:
 
     @classmethod
     def verify_password(cls, plain: str, hashed: str) -> bool:
-        return pwd_context.verify(plain, hashed)
+        return bcrypt.checkpw(plain.encode(), hashed.encode())
