@@ -20,6 +20,9 @@ def _get_client() -> MemoryClient:
     return _client
 
 
+_MEMORY_SCORE_THRESHOLD = 0.70  # only inject memories with at least 70% semantic relevance
+
+
 def get_memories(user_id: str, query: str) -> list[str]:
     """
     Search Mem0 for facts relevant to the user and the current query.
@@ -33,7 +36,11 @@ def get_memories(user_id: str, query: str) -> list[str]:
             filters={"user_id": user_id},
             limit=5,
         )
-        memories = [r["memory"][:300] for r in results.get("results", []) if r.get("memory")]
+        memories = [
+            r["memory"][:300]
+            for r in results.get("results", [])
+            if r.get("memory") and r.get("score", 0) >= _MEMORY_SCORE_THRESHOLD
+        ]
         if memories:
             logger.info("Retrieved %d memories for user='%s'", len(memories), user_id)
         else:
