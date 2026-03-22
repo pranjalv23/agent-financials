@@ -229,6 +229,6 @@ async def stream_query(query: str, session_id: str = "default"):
 
     # Save the complete response to Mem0 after streaming finishes
     response_text = "".join(full_response)
-    save_memory(user_id=session_id, query=query, response=response_text)
+    save_memory(user_id=user_id or session_id, query=query, response=response_text)
     logger.info("stream_query finished — session='%s', response length: %d chars",
                 session_id, len(response_text))
