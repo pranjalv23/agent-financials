@@ -36,6 +36,7 @@ class MongoDB:
         query: str,
         response: str,
         steps: list[dict] | None = None,
+        user_id: str | None = None,
     ) -> str:
         doc = {
             "session_id": session_id,
@@ -46,10 +47,12 @@ class MongoDB:
             "total_tool_calls": sum(1 for s in (steps or []) if s.get("action") == "tool_call"),
             "created_at": datetime.now(timezone.utc),
         }
+        if user_id:
+            doc["user_id"] = user_id
         result = await cls._collection().insert_one(doc)
         logger.info(
-            "Saved conversation — session='%s', doc_id='%s', tools_used=%s, tool_calls=%d",
-            session_id, result.inserted_id, doc["tools_used"], doc["total_tool_calls"],
+            "Saved conversation — session='%s', user='%s', doc_id='%s', tools_used=%s, tool_calls=%d",
+            session_id, user_id or "anonymous", result.inserted_id, doc["tools_used"], doc["total_tool_calls"],
         )
         return str(result.inserted_id)
 
@@ -60,6 +63,14 @@ class MongoDB:
             {"_id": 0, "query": 1, "response": 1, "created_at": 1},
         ).sort("created_at", 1)
         return await cursor.to_list(length=100)
+
+    @classmethod
+    async def get_history_by_user(cls, user_id: str) -> list[dict]:
+        cursor = cls._collection().find(
+            {"user_id": user_id},
+            {"_id": 0, "query": 1, "response": 1, "created_at": 1, "session_id": 1},
+        ).sort("created_at", -1)
+        return await cursor.to_list(length=200)
 
     @classmethod
     async def close(cls):

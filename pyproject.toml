@@ -17,6 +17,7 @@ dependencies = [
     "langgraph-checkpoint-mongodb (>=0.3.1)",
     "agent-sdk (>=0.1.0)",
     "qdrant-client (<1.17.1)",
+    "passlib[bcrypt] (>=1.7.4,<2.0.0)",
 ]
 
 

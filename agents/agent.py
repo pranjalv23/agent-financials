@@ -135,9 +135,11 @@ RESPONSE_FORMAT_INSTRUCTIONS = {
 }
 
 
-def _build_dynamic_context(session_id: str, query: str, response_format: str | None = None) -> str:
+def _build_dynamic_context(session_id: str, query: str, response_format: str | None = None,
+                            user_id: str | None = None) -> str:
     """Build dynamic context block (date, memories, format instructions) to prepend to the user query."""
-    memories = get_memories(user_id=session_id, query=query)
+    mem_key = user_id or session_id  # prefer stable user_id for Mem0
+    memories = get_memories(user_id=mem_key, query=query)
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     year = today[:4]
@@ -164,30 +166,30 @@ def _build_dynamic_context(session_id: str, query: str, response_format: str | N
 
 async def run_query(query: str, session_id: str = "default",
                     response_format: str | None = None, model_id: str | None = None,
-                    mode: str = "financial_analyst") -> dict:
-    logger.info("run_query called — session='%s', query='%s', model='%s', mode='%s'",
-                session_id, query[:100], model_id or "default", mode)
+                    mode: str = "financial_analyst", user_id: str | None = None) -> dict:
+    logger.info("run_query called — session='%s', user='%s', query='%s', model='%s', mode='%s'",
+                session_id, user_id or "anonymous", query[:100], model_id or "default", mode)
 
-    dynamic_context = _build_dynamic_context(session_id, query, response_format=response_format)
+    dynamic_context = _build_dynamic_context(session_id, query, response_format=response_format, user_id=user_id)
     enriched_query = dynamic_context + query
 
     agent = get_agent(mode)
     result = await agent.arun(enriched_query, session_id=session_id, system_prompt=SYSTEM_PROMPT, model_id=model_id)
     logger.info("run_query finished — session='%s', steps: %d", session_id, len(result["steps"]))
 
-    save_memory(user_id=session_id, query=query, response=result["response"])
+    save_memory(user_id=user_id or session_id, query=query, response=result["response"])
 
     return result
 
 
 def create_stream(query: str, session_id: str = "default",
                   response_format: str | None = None, model_id: str | None = None,
-                  mode: str = "financial_analyst"):
+                  mode: str = "financial_analyst", user_id: str | None = None):
     """Create a StreamResult for the query. Returns the stream object directly."""
-    logger.info("create_stream called — session='%s', query='%s', model='%s', mode='%s'",
-                session_id, query[:100], model_id or "default", mode)
+    logger.info("create_stream called — session='%s', user='%s', query='%s', model='%s', mode='%s'",
+                session_id, user_id or "anonymous", query[:100], model_id or "default", mode)
 
-    dynamic_context = _build_dynamic_context(session_id, query, response_format=response_format)
+    dynamic_context = _build_dynamic_context(session_id, query, response_format=response_format, user_id=user_id)
     enriched_query = dynamic_context + query
     agent = get_agent(mode)
     return agent.astream(enriched_query, session_id=session_id, system_prompt=SYSTEM_PROMPT, model_id=model_id)

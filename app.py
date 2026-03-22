@@ -4,11 +4,12 @@ import os
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from agents.agent import _agent_instances, get_agent, run_query, stream_query, create_stream
+from agents.agent import _agent_instances, get_agent, run_query, stream_query, create_stream, save_memory
+from database.auth import AuthDB
 from database.mongo import MongoDB
 from a2a_service.server import create_a2a_app
 
@@ -22,6 +23,8 @@ logger = logging.getLogger("agent_financials.api")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Ensure unique index on users collection
+    await AuthDB.ensure_index()
     # Connect MCP servers on startup for both modes
     for mode in ("standard", "financial_analyst"):
         agent = get_agent(mode)
@@ -67,17 +70,56 @@ class HistoryResponse(BaseModel):
     history: list[dict]
 
 
+class RegisterRequest(BaseModel):
+    email: str
+    password: str
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class AuthResponse(BaseModel):
+    user_id: str
+    email: str
+
+
+# ── Auth endpoints ──
+
+@app.post("/auth/register", response_model=AuthResponse)
+async def register(request: RegisterRequest):
+    existing = await AuthDB.get_user_by_email(request.email)
+    if existing:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
+    user = await AuthDB.create_user(request.email, request.password)
+    logger.info("Registered user email='%s'", user["email"])
+    return AuthResponse(user_id=user["user_id"], email=user["email"])
+
+
+@app.post("/auth/login", response_model=AuthResponse)
+async def login(request: LoginRequest):
+    user = await AuthDB.get_user_by_email(request.email)
+    if not user or not AuthDB.verify_password(request.password, user["password_hash"]):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
+    logger.info("Login user='%s'", user["user_id"])
+    return AuthResponse(user_id=user["user_id"], email=user["email"])
+
+
+# ── Agent endpoints ──
+
 @app.post("/ask", response_model=AskResponse)
-async def ask(request: AskRequest):
+async def ask(request: AskRequest, http_request: Request):
+    user_id = http_request.headers.get("X-User-Id") or None
     is_new = request.session_id is None
     session_id = request.session_id or MongoDB.generate_session_id()
 
-    logger.info("POST /ask — session='%s' (%s), query='%s'",
-                session_id, "new" if is_new else "existing", request.query[:100])
+    logger.info("POST /ask — session='%s' (%s), user='%s', query='%s'",
+                session_id, "new" if is_new else "existing", user_id or "anonymous", request.query[:100])
 
     result = await run_query(request.query, session_id=session_id,
                              response_format=request.response_format, model_id=request.model_id,
-                             mode=request.mode)
+                             mode=request.mode, user_id=user_id)
     response = result["response"]
     steps = result["steps"]
 
@@ -86,6 +128,7 @@ async def ask(request: AskRequest):
         query=request.query,
         response=response,
         steps=steps,
+        user_id=user_id,
     )
 
     logger.info("POST /ask complete — session='%s', response length: %d chars, tool_calls: %d",
@@ -100,18 +143,20 @@ async def ask(request: AskRequest):
 
 
 @app.post("/ask/stream")
-async def ask_stream(request: AskRequest):
+async def ask_stream(request: AskRequest, http_request: Request):
+    user_id = http_request.headers.get("X-User-Id") or None
     """Stream the agent's response as Server-Sent Events (SSE).
 
     Each event is a JSON object with a `text` field containing a chunk.
     The stream ends with a `[DONE]` sentinel.
     """
     session_id = request.session_id or MongoDB.generate_session_id()
-    logger.info("POST /ask/stream — session='%s', query='%s'", session_id, request.query[:100])
+    logger.info("POST /ask/stream — session='%s', user='%s', query='%s'",
+                session_id, user_id or "anonymous", request.query[:100])
 
     stream = create_stream(request.query, session_id=session_id,
                            response_format=request.response_format, model_id=request.model_id,
-                           mode=request.mode)
+                           mode=request.mode, user_id=user_id)
 
     async def event_stream():
         full_response = []
@@ -127,20 +172,32 @@ async def ask_stream(request: AskRequest):
             yield f"data: {json.dumps({'text': fallback})}\n\n"
             response_text = fallback
 
-        from agents.agent import save_memory
-        save_memory(user_id=session_id, query=request.query, response=response_text)
+        save_memory(user_id=user_id or session_id, query=request.query, response=response_text)
 
         await MongoDB.save_conversation(
             session_id=session_id,
             query=request.query,
             response=response_text,
             steps=stream.steps,
+            user_id=user_id,
         )
 
         yield f"data: {json.dumps({'session_id': session_id})}\n\n"
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.get("/history/user/me", response_model=HistoryResponse)
+async def get_history_by_user(http_request: Request):
+    user_id = http_request.headers.get("X-User-Id") or None
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+    """Get all conversation history for the authenticated user (across all sessions)."""
+    logger.info("GET /history/user/me — user='%s'", user_id)
+    history = await MongoDB.get_history_by_user(user_id)
+    logger.info("Returning %d history entries for user='%s'", len(history), user_id)
+    return HistoryResponse(session_id=user_id, history=history)
 
 
 @app.get("/history/{session_id}", response_model=HistoryResponse)
