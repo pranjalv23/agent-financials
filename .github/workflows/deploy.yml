@@ -1,0 +1,28 @@
+name: Deploy agent-financials
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Deploy to OCI VM
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.OCI_HOST }}
+          username: ubuntu
+          key: ${{ secrets.OCI_SSH_KEY }}
+          script: |
+            set -e
+            cd ~/repos/agent-financials
+            git fetch --tags
+            git checkout ${{ github.ref_name }}
+            git submodule update --init --recursive
+            cd ~/deploy
+            docker compose build --no-cache agent-financials
+            docker compose up -d --no-deps agent-financials
+            docker image prune -f
