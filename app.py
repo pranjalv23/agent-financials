@@ -5,8 +5,12 @@ from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 from agents.agent import _agent_instances, get_agent, run_query, stream_query, create_stream, save_memory
 from database.mongo import MongoDB
@@ -18,6 +22,7 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("agent_financials.api")
+limiter = Limiter(key_func=get_remote_address)
 
 
 @asynccontextmanager
@@ -40,6 +45,13 @@ app = FastAPI(
     description="Ask investing questions, analyze stocks, and get AI-powered financial market insights.",
     lifespan=lifespan,
 )
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+_raw_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:5173")
+_allowed_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
+app.add_middleware(CORSMiddleware, allow_origins=_allowed_origins, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 # Mount the A2A server as a sub-application
 a2a_app = create_a2a_app()
@@ -70,6 +82,7 @@ class HistoryResponse(BaseModel):
 # ── Agent endpoints ──
 
 @app.post("/ask", response_model=AskResponse)
+@limiter.limit("30/minute")
 async def ask(request: AskRequest, http_request: Request):
     user_id = http_request.headers.get("X-User-Id") or None
     is_new = request.session_id is None
@@ -104,6 +117,7 @@ async def ask(request: AskRequest, http_request: Request):
 
 
 @app.post("/ask/stream")
+@limiter.limit("30/minute")
 async def ask_stream(request: AskRequest, http_request: Request):
     user_id = http_request.headers.get("X-User-Id") or None
     """Stream the agent's response as Server-Sent Events (SSE).
@@ -187,4 +201,6 @@ async def health():
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8080))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    ssl_certfile = os.getenv("SSL_CERTFILE") or None
+    ssl_keyfile = os.getenv("SSL_KEYFILE") or None
+    uvicorn.run(app, host="0.0.0.0", port=port, ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
