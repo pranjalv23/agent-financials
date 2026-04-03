@@ -184,7 +184,7 @@ async def ask_stream(body: AskRequest, request: Request):
                 yield f"data: {json.dumps({'text': fallback})}\n\n"
                 full_response.append(fallback)
             except Exception as e:
-                logger.error("Stream failed: %s", e)
+                logger.error("Stream failed: %s", e, exc_info=True)
                 fallback = "\n\n[An error occurred while generating the response.]"
                 yield f"data: {json.dumps({'text': fallback})}\n\n"
                 full_response.append(fallback)
