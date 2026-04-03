@@ -17,7 +17,7 @@ logger = logging.getLogger("agent_financials.agent")
 # Intermediate analytical phases (company_analysis, sector_analysis, etc.)
 # emit pre-tool-call reasoning text that should not be shown to users.
 import agent_sdk.agents.base_agent as _base_agent_module
-_base_agent_module._STREAMING_NODES = frozenset({"llm_call", "synthesis"})
+_base_agent_module._STREAMING_NODES = frozenset({"synthesis"})
 
 SYSTEM_PROMPT = (
     "You are the Lead Financial Analyst and Investing Mentor at Agent Hub.\n"

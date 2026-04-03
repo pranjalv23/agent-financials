@@ -176,8 +176,12 @@ async def ask_stream(body: AskRequest, request: Request):
                 async with get_session_lock(session_id):
                     async with asyncio.timeout(_STREAM_TIMEOUT):
                         async for chunk in stream:
-                            full_response.append(chunk)
-                            yield f"data: {json.dumps({'text': chunk})}\n\n"
+                            if isinstance(chunk, str):
+                                full_response.append(chunk)
+                                yield f"data: {json.dumps({'text': chunk})}\n\n"
+                            else:
+                                # Log state updates for debugging but don't send to user
+                                logger.debug("Received state update chunk: %s", type(chunk))
             except TimeoutError:
                 logger.error("Stream timed out after %.0fs for session='%s'", _STREAM_TIMEOUT, session_id)
                 fallback = f"\n\n[Response timed out after {_STREAM_TIMEOUT:.0f} seconds. Please try a simpler query.]"
