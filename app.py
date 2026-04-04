@@ -14,6 +14,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from agents.agent import _agent_instances, get_agent, run_query, create_stream, save_memory, _fix_flash_card_format, get_session_lock
+from database.memory import _get_client as _get_mem0_client
 from database.mongo import MongoDB
 from a2a_service.server import create_a2a_app
 from charts.data import fetch_chart_data, VALID_PERIODS
@@ -103,6 +104,7 @@ class AskResponse(BaseModel):
     session_id: str
     query: str
     response: str
+    structured: dict | None = None
 
 
 class HistoryResponse(BaseModel):
@@ -145,6 +147,7 @@ async def ask(body: AskRequest, request: Request):
         session_id=session_id,
         query=body.query,
         response=response,
+        structured=result.get("synthesis_report"),
     )
 
 
@@ -168,6 +171,8 @@ async def ask_stream(body: AskRequest, request: Request):
 
     _STREAM_TIMEOUT = float(os.getenv("STREAM_TIMEOUT_SECONDS", "300"))
 
+    _PROGRESS_PREFIX = "__PROGRESS__:"
+
     async def event_stream():
         full_response = []
         try:
@@ -176,8 +181,15 @@ async def ask_stream(body: AskRequest, request: Request):
                 async with get_session_lock(session_id):
                     async with asyncio.timeout(_STREAM_TIMEOUT):
                         async for chunk in stream:
-                            full_response.append(chunk)
-                            yield f"data: {json.dumps({'text': chunk})}\n\n"
+                            if chunk.startswith(_PROGRESS_PREFIX):
+                                # Phase progress marker — route to a separate SSE event
+                                # type so the UI can display a progress indicator without
+                                # polluting the conversation text.
+                                label = chunk[len(_PROGRESS_PREFIX):]
+                                yield f"event: progress\ndata: {json.dumps({'phase': label})}\n\n"
+                            else:
+                                full_response.append(chunk)
+                                yield f"data: {json.dumps({'text': chunk})}\n\n"
             except TimeoutError:
                 logger.error("Stream timed out after %.0fs for session='%s'", _STREAM_TIMEOUT, session_id)
                 fallback = f"\n\n[Response timed out after {_STREAM_TIMEOUT:.0f} seconds. Please try a simpler query.]"
@@ -300,12 +312,24 @@ async def delete_watchlist(watchlist_id: str, request: Request):
 
 @app.get("/health")
 async def health():
-    # Skip Mem0 check for health endpoint — health checks run frequently and don't need memory validation
-    # Mem0 connectivity is only verified during actual user requests
-    return {
-        "status": "ok",
-        "service": "agent-financials",
-    }
+    checks: dict = {"service": "agent-financials", "status": "ok"}
+
+    # Mem0 connectivity check
+    mem0_api_key = os.getenv("MEM0_API_KEY")
+    if not mem0_api_key:
+        checks["mem0"] = "unconfigured"
+    else:
+        try:
+            client = _get_mem0_client()
+            # Lightweight ping — search with an empty query just to verify the connection
+            client.search(query="health check", version="v2", filters={"user_id": "__healthcheck__"}, limit=1)
+            checks["mem0"] = "ok"
+        except Exception as e:
+            logger.warning("Mem0 health check failed: %s", e)
+            checks["mem0"] = "degraded"
+            checks["status"] = "degraded"
+
+    return checks
 
 
 if __name__ == "__main__":
