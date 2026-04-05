@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 from agent_sdk.agents import BaseAgent
 from agent_sdk.checkpoint import AsyncMongoDBSaver
-from database.memory import get_memories, save_memory
+from agent_sdk.database.memory import get_memories, save_memory
 from database.mongo import MongoDB
 
 logger = logging.getLogger("agent_financials.agent")
@@ -16,8 +16,6 @@ logger = logging.getLogger("agent_financials.agent")
 # Restrict streaming to only the final synthesis output.
 # Intermediate analytical phases (company_analysis, sector_analysis, etc.)
 # emit pre-tool-call reasoning text that should not be shown to users.
-import agent_sdk.agents.base_agent as _base_agent_module
-_base_agent_module._STREAMING_NODES = frozenset({"llm_call", "synthesis"})
 
 SYSTEM_PROMPT = (
     "You are the Lead Financial Analyst and Investing Mentor at Agent Hub.\n"
@@ -116,6 +114,7 @@ def get_agent(mode: str = "financial_analyst") -> BaseAgent:
             provider="azure",
             checkpointer=_get_checkpointer(),
             mode=mode,
+            streaming_nodes=frozenset({"llm_call", "synthesis"}) if mode == "financial_analyst" else None,
         )
     return _agent_instances[mode]
 

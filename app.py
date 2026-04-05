@@ -7,14 +7,14 @@ from datetime import datetime, timezone
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from agents.agent import _agent_instances, get_agent, run_query, create_stream, save_memory, _fix_flash_card_format, get_session_lock
-from database.memory import _get_client as _get_mem0_client
+from agent_sdk.database.memory import _get_client as _get_mem0_client
 from database.mongo import MongoDB
 from a2a_service.server import create_a2a_app
 from charts.data import fetch_chart_data, VALID_PERIODS
@@ -74,6 +74,14 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 _raw_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:5173")
 _allowed_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=_allowed_origins, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+@app.middleware("http")
+async def verify_internal_key(request: Request, call_next):
+    if request.url.path not in ["/health", "/docs", "/openapi.json"]:
+        expected = os.getenv("INTERNAL_API_KEY")
+        if expected and request.headers.get("X-Internal-API-Key") != expected:
+            return JSONResponse(status_code=status.HTTP_401_UNAUTHORIZED, content={"detail": "Unauthorized internal access"})
+    return await call_next(request)
 
 # Mount the A2A server as a sub-application
 a2a_app = create_a2a_app()
