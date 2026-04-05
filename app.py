@@ -2,13 +2,13 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import date as _date, datetime, timezone
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -98,6 +98,19 @@ class AskRequest(BaseModel):
     as_of_date: str | None = None
 
     model_config = {"json_schema_extra": {"examples": [{"query": "Analyze RELIANCE.NS quarterly income statement.", "session_id": None, "response_format": "detailed", "model_id": None, "mode": "financial_analyst"}]}}
+
+    @field_validator("as_of_date")
+    @classmethod
+    def validate_as_of_date(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        try:
+            parsed = _date.fromisoformat(v)
+        except ValueError:
+            raise ValueError("as_of_date must be a valid ISO date string (YYYY-MM-DD)")
+        if parsed > _date.today():
+            raise ValueError("as_of_date cannot be in the future")
+        return v
 
 class WatchlistCreate(BaseModel):
     name: str
