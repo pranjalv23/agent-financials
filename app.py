@@ -1,40 +1,29 @@
-import json
+import asyncio
 import logging
 import os
+import uuid
 from contextlib import asynccontextmanager
-from datetime import date as _date, datetime, timezone
+from datetime import date as _date
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import Response, StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field, field_validator
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
+from agent_sdk.logging import configure_logging
+from agent_sdk.context import request_id_var, user_id_var
+from agent_sdk.metrics import metrics_response
 from agents.agent import _agent_instances, get_agent, run_query, create_stream, save_memory, _fix_flash_card_format, get_session_lock
 from agent_sdk.database.memory import _get_client as _get_mem0_client
 from database.mongo import MongoDB
 from a2a_service.server import create_a2a_app
 from charts.data import fetch_chart_data, VALID_PERIODS
 
-class _JsonFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
-        doc = {
-            "ts": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
-            "level": record.levelname,
-            "logger": record.name,
-            "msg": record.getMessage(),
-        }
-        if record.exc_info:
-            doc["exc"] = self.formatException(record.exc_info)
-        return json.dumps(doc, ensure_ascii=False)
-
-_handler = logging.StreamHandler()
-_handler.setFormatter(_JsonFormatter())
-logging.root.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
-logging.root.addHandler(_handler)
+configure_logging("agent_financials")
 logger = logging.getLogger("agent_financials.api")
 
 def get_remote_address_or_user(request: Request) -> str:
@@ -73,11 +62,30 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 _raw_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:5173")
 _allowed_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
-app.add_middleware(CORSMiddleware, allow_origins=_allowed_origins, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_allowed_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-Internal-API-Key", "X-User-Id", "X-Request-ID"],
+)
+
+_PUBLIC_PATHS = {"/health", "/metrics", "/docs", "/openapi.json", "/a2a/.well-known/agent.json"}
+
+@app.middleware("http")
+async def inject_request_id(request: Request, call_next):
+    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    tok_r = request_id_var.set(request_id)
+    tok_u = user_id_var.set(request.headers.get("X-User-Id"))
+    response = await call_next(request)
+    request_id_var.reset(tok_r)
+    user_id_var.reset(tok_u)
+    response.headers["X-Request-ID"] = request_id
+    return response
 
 @app.middleware("http")
 async def verify_internal_key(request: Request, call_next):
-    if request.url.path not in ["/health", "/docs", "/openapi.json", "/a2a/.well-known/agent.json"]:
+    if request.url.path not in _PUBLIC_PATHS:
         expected = os.getenv("INTERNAL_API_KEY")
         if expected and request.headers.get("X-Internal-API-Key") != expected:
             return JSONResponse(status_code=status.HTTP_401_UNAUTHORIZED, content={"detail": "Unauthorized internal access"})
@@ -198,7 +206,6 @@ async def ask_stream(body: AskRequest, request: Request):
         full_response = []
         try:
             try:
-                import asyncio
                 async with get_session_lock(session_id):
                     async with asyncio.timeout(_STREAM_TIMEOUT):
                         async for chunk in stream:
@@ -329,6 +336,12 @@ async def delete_watchlist(watchlist_id: str, request: Request):
     if not success:
         raise HTTPException(status_code=404, detail="Watchlist not found or unauthorized")
     return {"success": True}
+
+
+@app.get("/metrics")
+async def metrics():
+    content, content_type = metrics_response()
+    return Response(content=content, media_type=content_type)
 
 
 @app.get("/health")

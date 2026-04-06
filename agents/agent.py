@@ -152,28 +152,7 @@ RESPONSE_FORMAT_INSTRUCTIONS = {
 }
 
 
-def _fix_flash_card_format(text: str) -> str:
-    """Post-process flash card responses to enforce consistent ### heading format.
-
-    LLMs occasionally use ## or #### instead of ### for card headings despite
-    explicit instructions. This fixes it and strips any preamble before the first card.
-    """
-    # Normalize ## headers to ### (but not #### → only fix exact ## prefix)
-    text = re.sub(r'^## (?!#)', '### ', text, flags=re.MULTILINE)
-    # Normalize #### headers to ### (too deep)
-    text = re.sub(r'^#### ', '### ', text, flags=re.MULTILINE)
-
-    # Strip any preamble text before the first ### card heading
-    first_card = re.search(r'^### ', text, re.MULTILINE)
-    if first_card:
-        text = text[first_card.start():]
-
-    # Warn if fewer than 5 cards (don't modify, just log)
-    card_count = len(re.findall(r'^### ', text, re.MULTILINE))
-    if card_count < 5:
-        logger.warning("Flash card response has only %d cards (expected 8-12)", card_count)
-
-    return text
+from agent_sdk.agents.formatters import _fix_flash_card_format
 
 
 _TRIVIAL_FOLLOWUP_PATTERN = re.compile(
