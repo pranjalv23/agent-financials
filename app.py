@@ -210,7 +210,7 @@ async def ask_stream(body: AskRequest, request: Request):
                            mode=body.mode, user_id=user_id,
                            watchlist_id=body.watchlist_id, as_of_date=body.as_of_date)
 
-    _STREAM_TIMEOUT = float(os.getenv("STREAM_TIMEOUT_SECONDS", "300"))
+    _STREAM_TIMEOUT = float(os.getenv("STREAM_TIMEOUT_SECONDS", "600"))
 
     _PROGRESS_PREFIX = "__PROGRESS__:"
 
