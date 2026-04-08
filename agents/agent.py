@@ -121,7 +121,7 @@ def get_agent(mode: str = "financial_analyst") -> BaseAgent:
             provider="azure",
             checkpointer=_get_checkpointer(),
             mode=mode,
-            streaming_nodes=frozenset({"llm_call", "synthesis"}) if mode == "financial_analyst" else None,
+            streaming_nodes=None,  # Defaults to DEFAULT_STREAMING_NODES (all phases)
         )
     return _agent_instances[mode]
 
@@ -237,7 +237,10 @@ async def run_query(query: str, session_id: str = "default",
 
     agent = get_agent(mode)
     async with get_session_lock(session_id):
-        result = await agent.arun(enriched_query, session_id=session_id, system_prompt=SYSTEM_PROMPT, model_id=model_id)
+        result = await agent.arun(
+            enriched_query, session_id=session_id, system_prompt=SYSTEM_PROMPT,
+            model_id=model_id, as_of_date=as_of_date
+        )
     logger.info("run_query finished — session='%s', steps: %d", session_id, len(result["steps"]))
 
     # Sanitize potential JSON-wrapped outputs like {"full_report": "..."}
@@ -275,6 +278,9 @@ async def create_stream(query: str, session_id: str = "default",
     )
     enriched_query = dynamic_context + query
     agent = get_agent(mode)
-    return agent.astream(enriched_query, session_id=session_id, system_prompt=SYSTEM_PROMPT, model_id=model_id)
+    return agent.astream(
+        enriched_query, session_id=session_id, system_prompt=SYSTEM_PROMPT,
+        model_id=model_id, as_of_date=as_of_date
+    )
 
 
