@@ -153,9 +153,6 @@ RESPONSE_FORMAT_INSTRUCTIONS = {
 }
 
 
-from agent_sdk.agents.formatters import _fix_flash_card_format
-
-
 _TRIVIAL_FOLLOWUP_PATTERN = re.compile(
     r'^(yes|no|sure|ok|okay|please|proceed|go\s*ahead|continue|yeah|yep|thanks|thank\s*you|got\s*it|tell\s*me\s*more|no\s*thanks)$',
     re.IGNORECASE
@@ -245,9 +242,6 @@ async def run_query(query: str, session_id: str = "default",
     logger.info("run_query finished — session='%s', steps: %d", session_id, len(result["steps"]))
 
     # The SDK now handles JSON-wrapped outputs automatically via unwrap_structured_response
-    if response_format == "flash_cards":
-        result["response"] = _fix_flash_card_format(result["response"])
-
     save_memory(user_id=user_id or session_id, query=query, response=result["response"])
 
     return result
