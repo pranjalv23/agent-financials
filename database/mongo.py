@@ -19,7 +19,41 @@ class MongoDB(BaseMongoDatabase):
         return cls.get_client()[cls.db_name()]["watchlists"]
 
     @classmethod
-    async def create_watchlist(cls, user_id: str, name: str, tickers: list[str]) -> str:
+    def profile_collection(cls):
+        return cls.get_client()[cls.db_name()]["profiles"]
+
+    @classmethod
+    async def get_profile(cls, user_id: str) -> dict | None:
+        return await cls.profile_collection().find_one({"user_id": user_id}, {"_id": 0})
+
+    @classmethod
+    async def upsert_profile(cls, user_id: str, data: dict) -> None:
+        await cls.profile_collection().update_one(
+            {"user_id": user_id},
+            {
+                "$set": {**data, "updated_at": datetime.now(timezone.utc)},
+                "$setOnInsert": {"created_at": datetime.now(timezone.utc)},
+            },
+            upsert=True,
+        )
+
+    @staticmethod
+    def _normalize_tickers(raw_tickers: list) -> list[dict]:
+        """Accept both legacy list[str] and new list[dict] ticker formats."""
+        result = []
+        for t in raw_tickers:
+            if isinstance(t, str):
+                result.append({"symbol": t, "entry_price": None, "added_at": None})
+            elif isinstance(t, dict):
+                result.append({
+                    "symbol": t.get("symbol", ""),
+                    "entry_price": t.get("entry_price"),
+                    "added_at": t.get("added_at"),
+                })
+        return result
+
+    @classmethod
+    async def create_watchlist(cls, user_id: str, name: str, tickers: list) -> str:
         doc = {
             "user_id": user_id,
             "name": name,
@@ -51,7 +85,7 @@ class MongoDB(BaseMongoDatabase):
         return doc
 
     @classmethod
-    async def update_watchlist(cls, user_id: str, watchlist_id: str, name: str | None = None, tickers: list[str] | None = None) -> bool:
+    async def update_watchlist(cls, user_id: str, watchlist_id: str, name: str | None = None, tickers: list | None = None) -> bool:
         from bson import ObjectId
         updates = {"updated_at": datetime.now(timezone.utc)}
         if name is not None:
@@ -81,3 +115,4 @@ class MongoDB(BaseMongoDatabase):
     @classmethod
     async def ensure_indexes(cls) -> None:
         await super().ensure_indexes()
+        await cls.profile_collection().create_index("user_id", unique=True)

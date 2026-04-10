@@ -4,9 +4,10 @@ import json
 import os
 import uuid
 from contextlib import asynccontextmanager
-from datetime import date as _date
+from datetime import date as _date, datetime, timezone
 
 import uvicorn
+import yfinance as yf
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse, JSONResponse
@@ -21,6 +22,7 @@ from agent_sdk.metrics import metrics_response
 from agents.agent import _agent_instances, get_agent, run_query, create_stream, save_memory, get_session_lock
 from agent_sdk.database.memory import _get_client as _get_mem0_client
 from database.mongo import MongoDB
+from database.profile import ONBOARDING_QUESTIONS, VALID_RISK_TOLERANCES, VALID_GOALS, VALID_KNOWLEDGE_LEVELS
 from a2a_service.server import create_a2a_app
 from charts.data import fetch_chart_data, VALID_PERIODS
 
@@ -111,7 +113,10 @@ app.mount("/a2a", a2a_app.build())
 class AskRequest(BaseModel):
     query: str = Field(min_length=1, max_length=5000)
     session_id: str | None = None
-    response_format: str | None = Field(default=None, pattern="^(summary|flash_cards|detailed)$")
+    response_format: str | None = Field(
+        default=None,
+        pattern="^(summary|flash_cards|detailed|beginner|intermediate|expert)$",
+    )
     model_id: str | None = None
     mode: str = Field(default="financial_analyst", pattern="^(standard|financial_analyst)$")
     watchlist_id: str | None = None
@@ -132,13 +137,49 @@ class AskRequest(BaseModel):
             raise ValueError("as_of_date cannot be in the future")
         return v
 
+
+class InvestorProfileCreate(BaseModel):
+    age: int = Field(ge=10, le=100)
+    monthly_investable_inr: int = Field(ge=0)
+    time_horizon_years: int = Field(ge=1, le=50)
+    goals: str
+    risk_tolerance: str
+    knowledge_level: str
+
+    @field_validator("goals")
+    @classmethod
+    def validate_goals(cls, v: str) -> str:
+        if v not in VALID_GOALS:
+            raise ValueError(f"Must be one of: {sorted(VALID_GOALS)}")
+        return v
+
+    @field_validator("risk_tolerance")
+    @classmethod
+    def validate_risk_tolerance(cls, v: str) -> str:
+        if v not in VALID_RISK_TOLERANCES:
+            raise ValueError(f"Must be one of: {sorted(VALID_RISK_TOLERANCES)}")
+        return v
+
+    @field_validator("knowledge_level")
+    @classmethod
+    def validate_knowledge_level(cls, v: str) -> str:
+        if v not in VALID_KNOWLEDGE_LEVELS:
+            raise ValueError(f"Must be one of: {sorted(VALID_KNOWLEDGE_LEVELS)}")
+        return v
+
+
+class WatchlistTickerItem(BaseModel):
+    symbol: str
+    entry_price: float | None = None
+    added_at: str | None = None  # ISO date string
+
 class WatchlistCreate(BaseModel):
     name: str
-    tickers: list[str]
+    tickers: list[str | WatchlistTickerItem]
 
 class WatchlistUpdate(BaseModel):
     name: str | None = None
-    tickers: list[str] | None = None
+    tickers: list[str | WatchlistTickerItem] | None = None
 
 
 class AskResponse(BaseModel):
@@ -322,7 +363,7 @@ async def get_chart_data(ticker: str, period: str = "1y"):
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
     return data
 
-# ── Watchlist Endpoints ──
+# ── Profile Endpoints ──
 
 def _require_user_id(request: Request) -> str:
     user_id = request.headers.get("X-User-Id")
@@ -330,10 +371,32 @@ def _require_user_id(request: Request) -> str:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
     return user_id
 
+@app.get("/profile/onboard/start")
+async def onboard_start():
+    """Return the ordered onboarding questionnaire."""
+    return {"questions": ONBOARDING_QUESTIONS, "total": len(ONBOARDING_QUESTIONS)}
+
+@app.get("/profile")
+async def get_profile(request: Request):
+    user_id = _require_user_id(request)
+    profile = await MongoDB.get_profile(user_id)
+    return {"profile": profile, "onboarding_complete": profile is not None}
+
+@app.put("/profile")
+async def upsert_profile(body: InvestorProfileCreate, request: Request):
+    user_id = _require_user_id(request)
+    await MongoDB.upsert_profile(user_id, body.model_dump())
+    logger.info("Upserted investor profile for user='%s'", user_id)
+    return {"success": True}
+
+
+# ── Watchlist Endpoints ──
+
 @app.post("/watchlists")
 async def create_watchlist(body: WatchlistCreate, request: Request):
     user_id = _require_user_id(request)
-    inserted_id = await MongoDB.create_watchlist(user_id, body.name, body.tickers)
+    raw_tickers = [t if isinstance(t, str) else t.model_dump() for t in body.tickers]
+    inserted_id = await MongoDB.create_watchlist(user_id, body.name, raw_tickers)
     return {"id": inserted_id}
 
 @app.get("/watchlists")
@@ -341,6 +404,45 @@ async def list_watchlists(request: Request):
     user_id = _require_user_id(request)
     watchlists = await MongoDB.get_watchlists(user_id)
     return {"watchlists": watchlists}
+
+@app.get("/watchlists/{watchlist_id}/performance")
+async def get_watchlist_performance(watchlist_id: str, request: Request):
+    """Fetch live prices for all watchlist tickers and compute P&L vs entry_price."""
+    user_id = _require_user_id(request)
+    watchlist = await MongoDB.get_watchlist(user_id, watchlist_id)
+    if not watchlist:
+        raise HTTPException(status_code=404, detail="Watchlist not found")
+
+    items = MongoDB._normalize_tickers(watchlist.get("tickers", []))
+    results = []
+    for item in items:
+        symbol = item["symbol"]
+        entry_price = item.get("entry_price")
+        current_price = day_change_pct = pnl_pct = None
+        try:
+            fi = yf.Ticker(symbol).fast_info
+            current_price = round(float(fi.last_price), 2) if fi.last_price else None
+            if current_price and fi.previous_close:
+                day_change_pct = round(((current_price - fi.previous_close) / fi.previous_close) * 100, 2)
+            if current_price and entry_price:
+                pnl_pct = round(((current_price - entry_price) / entry_price) * 100, 2)
+        except Exception as e:
+            logger.warning("Price fetch failed for '%s': %s", symbol, e)
+        results.append({
+            "symbol": symbol,
+            "entry_price": entry_price,
+            "added_at": item.get("added_at"),
+            "current_price": current_price,
+            "day_change_pct": day_change_pct,
+            "pnl_pct": pnl_pct,
+        })
+
+    return {
+        "watchlist_id": watchlist_id,
+        "name": watchlist.get("name"),
+        "performance": results,
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 @app.get("/watchlists/{watchlist_id}")
 async def get_watchlist(watchlist_id: str, request: Request):
@@ -353,7 +455,11 @@ async def get_watchlist(watchlist_id: str, request: Request):
 @app.put("/watchlists/{watchlist_id}")
 async def update_watchlist(watchlist_id: str, body: WatchlistUpdate, request: Request):
     user_id = _require_user_id(request)
-    success = await MongoDB.update_watchlist(user_id, watchlist_id, body.name, body.tickers)
+    raw_tickers = (
+        [t if isinstance(t, str) else t.model_dump() for t in body.tickers]
+        if body.tickers is not None else None
+    )
+    success = await MongoDB.update_watchlist(user_id, watchlist_id, body.name, raw_tickers)
     if not success:
         raise HTTPException(status_code=404, detail="Watchlist not found or unauthorized")
     return {"success": True}

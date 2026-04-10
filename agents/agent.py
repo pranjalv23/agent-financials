@@ -7,10 +7,12 @@ import string
 import time
 from datetime import datetime, timezone
 
+import httpx
 from agent_sdk.agents import BaseAgent
 from agent_sdk.checkpoint import AsyncMongoDBSaver
 from agent_sdk.database.memory import get_memories, save_memory
 from database.mongo import MongoDB
+from database.profile import derive_output_mode, profile_context_summary
 
 logger = logging.getLogger("agent_financials.agent")
 
@@ -40,7 +42,8 @@ SYSTEM_PROMPT = (
     "1. **Vector-DB First:** For any company analysis, you MUST start by calling `check_in_vector_db` to see if we already have indexed reports. If we do, use `retrieve_from_vector_db` before searching the web.\n"
     "2. **Data Enrichment:** Only if Vector-DB is empty or outdated, use `add_financial_reports_to_db` then retrieve.\n"
     "3. **Market Context:** Use `get_ticker_data` for current price and basic metrics.\n"
-    "4. **The 'Why' (Web Search):** Use `tavily_quick_search` for recent news and sentiment. Use `firecrawl_deep_scrape` for in-depth reading of specific news URLs discovered via Tavily.\n\n"
+    "4. **The 'Why' (Web Search):** Use `tavily_quick_search` for recent news and sentiment. Use `firecrawl_deep_scrape` for in-depth reading of specific news URLs discovered via Tavily.\n"
+    "5. **Calculators:** Use `calculate_sip_returns`, `calculate_goal_sip`, and `calculate_inflation_impact` when the user asks about SIP projections, investment goals, or inflation impact.\n\n"
 
     "### THE 'PREMIUM' RESPONSE STRUCTURE\n"
     "1. **The Executive Summary** — A high-level overview of the company and your immediate analytical takeaway.\n"
@@ -76,12 +79,90 @@ MCP_SERVERS = {
 _agent_instances: dict[str, BaseAgent] = {}
 _checkpointer: AsyncMongoDBSaver | None = None
 
+# ── Pattern detectors ──────────────────────────────────────────
+
+_HIGH_RISK_PATTERN = re.compile(
+    r'\b(penny\s*stock|f\s*[&and]+\s*o|futures?\s*and\s*options?|options?\s*trading|'
+    r'double\s*my\s*money|triple\s*returns?|intraday|derivatives?|microcap|nano[\s-]cap)\b',
+    re.IGNORECASE,
+)
+_NEWS_QUERY_PATTERN = re.compile(
+    r'\b(news|market\s+today|what\s+happened|rbi|budget|policy|rate\s+cut|'
+    r'inflation|gdp|fii|dii|sensex\s+today|nifty\s+today|crash|rally|'
+    r'quarterly\s+results?|earnings?)\b',
+    re.IGNORECASE,
+)
+
+_NEWS_AGENT_URL = os.getenv("NEWS_AGENT_URL", "http://localhost:9004")
+_INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "")
+
+# ── Jargon glossary — injected into system prompt for beginner users ──
+
+_JARGON_GLOSSARY_INJECTION = (
+    "\n\n### JARGON RULE (active — user is a beginner)\n"
+    "The FIRST time any of these terms appears in your response, "
+    "immediately append a parenthetical plain-English definition:\n"
+    "- P/E ratio → (how many years of profits you're paying for the stock)\n"
+    "- CAGR → (Compound Annual Growth Rate — average yearly growth over multiple years)\n"
+    "- NAV → (Net Asset Value — the price of one unit of a mutual fund)\n"
+    "- SIP → (Systematic Investment Plan — a fixed amount invested every month automatically)\n"
+    "- ELSS → (Equity Linked Savings Scheme — a tax-saving mutual fund, locked for 3 years)\n"
+    "- F&O → (Futures & Options — advanced, high-risk derivatives; NOT suitable for beginners)\n"
+    "- XIRR → (your actual annualised return accounting for the timing of investments)\n"
+    "- Sensex / Nifty → (India's main stock market indices — the overall market's scoreboard)\n"
+    "- FII / DII → (Foreign / Domestic Institutional Investors — large money managers)\n"
+    "- Debt fund → (a mutual fund investing in bonds — safer and more stable than equity funds)\n"
+)
+
+RESPONSE_FORMAT_INSTRUCTIONS: dict[str, str] = {
+    "beginner": (
+        "\n\nRESPONSE FORMAT — BEGINNER MODE:\n"
+        "1. ONE clear verdict or recommendation — no fence-sitting.\n"
+        "2. Exactly 3 bullet points: plain English, no dense analysis.\n"
+        "3. ONE risk warning in simple language.\n"
+        "4. Use analogies (e.g. 'think of an index fund like buying a tiny slice of all 50 top Indian companies').\n"
+        "5. No tables with more than 3 columns. Maximum 400 words.\n"
+        "6. Apply the JARGON RULE defined in your system prompt."
+    ),
+    "intermediate": (
+        "\n\nRESPONSE FORMAT — INTERMEDIATE MODE:\n"
+        "1. A concise analytical verdict (2-3 sentences).\n"
+        "2. Key metrics in a compact table with brief interpretations.\n"
+        "3. Main catalyst and main risk — 1 paragraph each.\n"
+        "4. Clear actionable takeaway. Maximum 600 words."
+    ),
+    "summary": (
+        "\n\nRESPONSE FORMAT OVERRIDE: The user wants a QUICK SUMMARY. "
+        "Keep your response concise — 5-7 bullet points maximum covering the key metrics, "
+        "one-line interpretation of each, and a 2-sentence bottom line. "
+        "Skip detailed section headers, long explanations, and tables."
+    ),
+    "flash_cards": (
+        "\n\nRESPONSE FORMAT OVERRIDE: The user wants INSIGHT CARDS. "
+        "Format your response as a series of insight cards using this EXACT format for each card:\n\n"
+        "### [Topic Label]\n"
+        "**Key Insight:** [The main metric, data point, or finding — keep it short and prominent]\n"
+        "[1-2 sentence explanation of what this means and why it matters]\n\n"
+        "STRICT FORMATTING RULES:\n"
+        "- Use exactly ### (three hashes) for each card topic — NOT ## or ####\n"
+        "- Do NOT wrap topic names in **bold** — just plain text after ###\n"
+        "- Do NOT use bullet points (- or *) for the Key Insight line — start it directly with **Key Insight:**\n"
+        "- Every card MUST have a **Key Insight:** line\n"
+        "- Start directly with the first ### card — no title header, preamble, or introductory text before the cards\n\n"
+        "Generate 8-12 cards covering: key financial metrics, valuation, strengths, risks, "
+        "growth prospects, and a bottom-line view."
+    ),
+    "detailed": "",  # default — uses the full system prompt format as-is
+    "expert": "",    # alias for detailed
+}
+
+
 class LockCache:
     def __init__(self, ttl: int = 3600):
         self._locks = {}
         self._timestamps = {}
         self._ttl = ttl
-    
+
     def get_lock(self, session_id: str) -> asyncio.Lock:
         now = time.time()
         expired = [sid for sid, ts in self._timestamps.items() if now - ts > self._ttl]
@@ -127,32 +208,6 @@ def get_agent(mode: str = "financial_analyst") -> BaseAgent:
     return _agent_instances[mode]
 
 
-RESPONSE_FORMAT_INSTRUCTIONS = {
-    "summary": (
-        "\n\nRESPONSE FORMAT OVERRIDE: The user wants a QUICK SUMMARY. "
-        "Keep your response concise — 5-7 bullet points maximum covering the key metrics, "
-        "one-line interpretation of each, and a 2-sentence bottom line. "
-        "Skip detailed section headers, long explanations, and tables."
-    ),
-    "flash_cards": (
-        "\n\nRESPONSE FORMAT OVERRIDE: The user wants INSIGHT CARDS. "
-        "Format your response as a series of insight cards using this EXACT format for each card:\n\n"
-        "### [Topic Label]\n"
-        "**Key Insight:** [The main metric, data point, or finding — keep it short and prominent]\n"
-        "[1-2 sentence explanation of what this means and why it matters]\n\n"
-        "STRICT FORMATTING RULES:\n"
-        "- Use exactly ### (three hashes) for each card topic — NOT ## or ####\n"
-        "- Do NOT wrap topic names in **bold** — just plain text after ###\n"
-        "- Do NOT use bullet points (- or *) for the Key Insight line — start it directly with **Key Insight:**\n"
-        "- Every card MUST have a **Key Insight:** line\n"
-        "- Start directly with the first ### card — no title header, preamble, or introductory text before the cards\n\n"
-        "Generate 8-12 cards covering: key financial metrics, valuation, strengths, risks, "
-        "growth prospects, and a bottom-line view."
-    ),
-    "detailed": "",  # default — uses the full system prompt format as-is
-}
-
-
 _TRIVIAL_FOLLOWUP_PATTERN = re.compile(
     r'^(yes|no|sure|ok|okay|please|proceed|go\s*ahead|continue|yeah|yep|thanks|thank\s*you|got\s*it|tell\s*me\s*more|no\s*thanks)$',
     re.IGNORECASE
@@ -163,12 +218,95 @@ def _is_trivial_followup(query: str) -> bool:
     return bool(_TRIVIAL_FOLLOWUP_PATTERN.match(normalized))
 
 
-async def _build_dynamic_context(session_id: str, query: str, response_format: str | None = None,
-                                user_id: str | None = None, as_of_date: str | None = None,
-                                watchlist_id: str | None = None) -> str:
-    """Build dynamic context block (date, memories, format instructions) to prepend to the user query."""
-    mem_key = user_id or session_id  # prefer stable user_id for Mem0
-    # Skip Mem0 search for trivial follow-ups
+def _is_high_risk_query(query: str) -> bool:
+    return bool(_HIGH_RISK_PATTERN.search(query))
+
+
+def _is_news_query(query: str) -> bool:
+    return bool(_NEWS_QUERY_PATTERN.search(query))
+
+
+async def _fetch_news_context(query: str, session_id: str) -> str | None:
+    """Call agent-news /ask and return a context string. Returns None on any failure."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                f"{_NEWS_AGENT_URL}/ask",
+                json={
+                    "query": query,
+                    "session_id": f"fin-ctx-{session_id}",
+                    "response_format": "summary",
+                },
+                headers={"X-Internal-API-Key": _INTERNAL_API_KEY},
+            )
+            resp.raise_for_status()
+            news = resp.json().get("response", "").strip()
+            if news:
+                logger.info("Fetched news context (%d chars) for session='%s'", len(news), session_id)
+                return f"LIVE NEWS CONTEXT (from agent-news):\n{news}"
+    except httpx.TimeoutException:
+        logger.warning("News agent timed out for session='%s'", session_id)
+    except Exception as e:
+        logger.warning("News agent fetch failed for session='%s': %s", session_id, e)
+    return None
+
+
+def _build_system_prompt(profile: dict | None) -> str:
+    """Compose the final system prompt, adapting to investor knowledge level."""
+    kl = (profile or {}).get("knowledge_level", "expert")
+    prompt = SYSTEM_PROMPT
+
+    prompt += (
+        "\n\n### LEARNING PATH & CONTINUITY\n"
+        "Review the [CONTEXT] memories for topics the user has previously explored. "
+        "When a prior topic connects to the current question, reference it explicitly "
+        "(e.g. 'You asked about SIPs last week — here's how that connects to ELSS tax saving.'). "
+        "At the end of concept-explanations, suggest one natural next topic in one sentence.\n"
+    )
+
+    prompt += (
+        "\n\n### MANDATORY DISCLAIMER\n"
+        "Append to EVERY response:\n"
+        "> This is educational content only and does not constitute SEBI-registered investment advice. "
+        "Consult a qualified financial advisor before making investment decisions.\n"
+        "For high-risk queries (F&O, penny stocks, small-caps for beginners), "
+        "add a proportional risk warning before the disclaimer.\n"
+    )
+
+    if kl == "beginner":
+        prompt += _JARGON_GLOSSARY_INJECTION
+        prompt += (
+            "\n\n### WHERE-TO-START WIZARD\n"
+            "When the user asks 'where do I start' or 'how do I begin investing', "
+            "walk them through this decision tree conversationally:\n"
+            "1. Emergency fund (3-6 months expenses)?\n"
+            "   → NO → Liquid fund or high-yield savings account first.\n"
+            "   → YES → Continue.\n"
+            "2. Stable monthly income?\n"
+            "   → NO → Start with a Liquid Fund SIP.\n"
+            "   → YES → Continue.\n"
+            "3. Time horizon?\n"
+            "   → <3 years → Debt mutual fund or recurring deposit.\n"
+            "   → 3-5 years → Balanced/hybrid mutual fund SIP.\n"
+            "   → >5 years → Nifty 50 index fund SIP (or ELSS for tax saving).\n"
+            "Always close with: 'Start small — even ₹500/month via SIP is a great first step.'\n"
+        )
+
+    return prompt
+
+
+async def _build_dynamic_context(
+    session_id: str,
+    query: str,
+    response_format: str | None = None,
+    user_id: str | None = None,
+    as_of_date: str | None = None,
+    watchlist_id: str | None = None,
+    profile: dict | None = None,
+) -> tuple[str, str]:
+    """Build [CONTEXT] block and resolve effective response format.
+    Returns (context_block_string, effective_format)."""
+    mem_key = user_id or session_id
     mem_error: str | None = None
     if not _is_trivial_followup(query) and len(query.strip()) > 10:
         memories, mem_error = get_memories(user_id=mem_key, query=query)
@@ -178,46 +316,66 @@ async def _build_dynamic_context(session_id: str, query: str, response_format: s
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     year = today[:4]
 
-    parts = []
-    
-    # Point-in-time context injection (PR 13)
+    # Resolve effective output mode (explicit > profile-derived > default)
+    effective_format = response_format
+    if effective_format is None and profile:
+        effective_format = derive_output_mode(profile)
+    effective_format = effective_format or "detailed"
+
+    parts: list[str] = []
+
     if as_of_date:
         parts.append(
-            f"IMPORTANT: The user is requesting a historical analysis as of {as_of_date}. "
-            f"While yfinance provides current data, please interpret all reported metrics "
-            f"within the context of that specific date. Acknowledge that fundamental data "
-            f"may be the most recent available rather than a true point-in-time snapshot."
+            f"IMPORTANT: Historical analysis as of {as_of_date}. "
+            f"Interpret metrics within that date's context."
         )
     else:
         parts.append(
-            f"Today's date: {today}. When using tavily_quick_search include the current year "
-            f"({year}) in search queries (e.g. 'HDFC Bank Q4 {year} results')."
+            f"Today's date: {today}. Include current year ({year}) in tavily_quick_search queries "
+            f"(e.g. 'HDFC Bank Q4 {year} results')."
         )
 
-    # Watchlist context injection (PR 13)
+    if profile:
+        parts.append(profile_context_summary(profile))
+
     if watchlist_id and user_id:
         watchlist = await MongoDB.get_watchlist(user_id, watchlist_id)
         if watchlist:
-            tickers = ", ".join(watchlist.get("tickers", []))
-            parts.append(f"User's active watchlist ('{watchlist.get('name')}'): {tickers}")
+            raw = watchlist.get("tickers", [])
+            symbols = [t["symbol"] if isinstance(t, dict) else t for t in raw]
+            parts.append(f"User's active watchlist ('{watchlist.get('name')}'): {', '.join(symbols)}")
             logger.info("Injected watchlist '%s' into context", watchlist_id)
 
     if memories:
-        memory_lines = "\n".join(f"- {m}" for m in memories)
-        parts.append(f"User context (long-term memory):\n{memory_lines}")
-        logger.info("Injected %d memories into context for session='%s'", len(memories), session_id)
+        parts.append("User context (long-term memory):\n" + "\n".join(f"- {m}" for m in memories))
+        logger.info("Injected %d memories for session='%s'", len(memories), session_id)
 
     if mem_error:
         parts.append(f"Note: {mem_error}")
         logger.warning("Mem0 degradation for session='%s': %s", session_id, mem_error)
 
-    format_instruction = RESPONSE_FORMAT_INSTRUCTIONS.get(response_format or "detailed", "")
+    if _is_news_query(query) and not _is_trivial_followup(query):
+        news_ctx = await _fetch_news_context(query, session_id)
+        if news_ctx:
+            parts.append(news_ctx)
+
+    if _is_high_risk_query(query) and profile and profile.get("knowledge_level") == "beginner":
+        parts.append(
+            "SAFETY ALERT: User's query involves high-risk instruments (F&O / penny stocks). "
+            "Their profile shows BEGINNER level. You MUST: "
+            "(1) warn clearly this is unsuitable for beginners, "
+            "(2) explain why the risk is disproportionate to their profile, "
+            "(3) suggest a safer alternative (index fund SIP / large-cap MF). "
+            "Do NOT analyze the high-risk instrument as if it were appropriate."
+        )
+
+    format_instruction = RESPONSE_FORMAT_INSTRUCTIONS.get(effective_format, "")
     if format_instruction:
         parts.append(format_instruction.strip())
-        logger.info("Applied response format '%s' for session='%s'", response_format, session_id)
+        logger.info("Applied response format '%s' for session='%s'", effective_format, session_id)
 
-    context_block = "\n\n".join(parts)
-    return f"[CONTEXT]\n{context_block}\n[/CONTEXT]\n\n"
+    context_block = "[CONTEXT]\n" + "\n\n".join(parts) + "\n[/CONTEXT]\n\n"
+    return context_block, effective_format
 
 
 async def run_query(query: str, session_id: str = "default",
@@ -227,43 +385,46 @@ async def run_query(query: str, session_id: str = "default",
     logger.info("run_query called — session='%s', user='%s', query='%s', model='%s', mode='%s', as_of=%s, watchlist=%s",
                 session_id, user_id or "anonymous", query[:100], model_id or "default", mode, as_of_date, watchlist_id)
 
-    dynamic_context = await _build_dynamic_context(
+    profile: dict | None = await MongoDB.get_profile(user_id) if user_id else None
+
+    dynamic_context, _ = await _build_dynamic_context(
         session_id, query, response_format=response_format, user_id=user_id,
-        as_of_date=as_of_date, watchlist_id=watchlist_id
+        as_of_date=as_of_date, watchlist_id=watchlist_id, profile=profile,
     )
     enriched_query = dynamic_context + query
 
     agent = get_agent(mode)
     async with get_session_lock(session_id):
         result = await agent.arun(
-            enriched_query, session_id=session_id, system_prompt=SYSTEM_PROMPT,
-            model_id=model_id, as_of_date=as_of_date
+            enriched_query, session_id=session_id,
+            system_prompt=_build_system_prompt(profile),
+            model_id=model_id, as_of_date=as_of_date,
         )
     logger.info("run_query finished — session='%s', steps: %d", session_id, len(result["steps"]))
 
-    # The SDK now handles JSON-wrapped outputs automatically via unwrap_structured_response
     save_memory(user_id=user_id or session_id, query=query, response=result["response"])
 
     return result
 
 
 async def create_stream(query: str, session_id: str = "default",
-                   response_format: str | None = None, model_id: str | None = None,
-                   mode: str = "financial_analyst", user_id: str | None = None,
-                   as_of_date: str | None = None, watchlist_id: str | None = None):
+                        response_format: str | None = None, model_id: str | None = None,
+                        mode: str = "financial_analyst", user_id: str | None = None,
+                        as_of_date: str | None = None, watchlist_id: str | None = None):
     """Create a StreamResult for the query. Returns the stream object directly."""
     logger.info("create_stream called — session='%s', user='%s', query='%s', model='%s', mode='%s', as_of=%s, watchlist=%s",
                 session_id, user_id or "anonymous", query[:100], model_id or "default", mode, as_of_date, watchlist_id)
 
-    dynamic_context = await _build_dynamic_context(
+    profile: dict | None = await MongoDB.get_profile(user_id) if user_id else None
+
+    dynamic_context, _ = await _build_dynamic_context(
         session_id, query, response_format=response_format, user_id=user_id,
-        as_of_date=as_of_date, watchlist_id=watchlist_id
+        as_of_date=as_of_date, watchlist_id=watchlist_id, profile=profile,
     )
     enriched_query = dynamic_context + query
     agent = get_agent(mode)
     return agent.astream(
-        enriched_query, session_id=session_id, system_prompt=SYSTEM_PROMPT,
-        model_id=model_id, as_of_date=as_of_date
+        enriched_query, session_id=session_id,
+        system_prompt=_build_system_prompt(profile),
+        model_id=model_id, as_of_date=as_of_date,
     )
-
-
