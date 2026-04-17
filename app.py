@@ -522,20 +522,14 @@ async def metrics():
 async def health():
     checks: dict = {"service": "agent-financials", "status": "ok"}
 
-    # Mem0 connectivity check
+    # Mem0 connectivity check - passive check only to save quota
     mem0_api_key = os.getenv("MEM0_API_KEY")
     if not mem0_api_key:
         checks["mem0"] = "unconfigured"
     else:
-        try:
-            client = _get_mem0_client()
-            # Lightweight ping — search with an empty query just to verify the connection
-            client.search(query="health check", version="v2", filters={"user_id": "__healthcheck__"}, limit=1)
-            checks["mem0"] = "ok"
-        except Exception as e:
-            logger.warning("Mem0 health check failed: %s", e)
-            checks["mem0"] = "degraded"
-            checks["status"] = "degraded"
+        # We no longer perform a live search here (client.search) as it burns quota
+        # every 15 seconds during Docker health checks.
+        checks["mem0"] = "configured"
 
     return checks
 
