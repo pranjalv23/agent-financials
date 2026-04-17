@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -8,6 +9,7 @@ import time
 from datetime import datetime, timezone
 
 import httpx
+from cachetools import TTLCache
 from agent_sdk.agents import BaseAgent
 from agent_sdk.checkpoint import AsyncMongoDBSaver
 from agent_sdk.database.memory import get_memories, save_memory
@@ -175,6 +177,10 @@ _NEWS_QUERY_PATTERN = re.compile(
 _NEWS_AGENT_URL = os.getenv("NEWS_AGENT_URL", "http://localhost:9004")
 _INTERNAL_API_KEY = os.getenv("INTERNAL_API_KEY", "")
 
+# News context cache: key = hash(query), TTL = 15 minutes (900s)
+# Prevents redundant calls when multiple users query the same news topic concurrently.
+_news_context_cache: TTLCache = TTLCache(maxsize=256, ttl=900)
+
 # ── Jargon glossary — injected into system prompt for beginner users ──
 
 _JARGON_GLOSSARY_INJECTION = (
@@ -320,7 +326,17 @@ def _is_news_query(query: str) -> bool:
 
 
 async def _fetch_news_context(query: str, session_id: str) -> str | None:
-    """Call agent-news /ask and return a context string. Returns None on any failure."""
+    """Call agent-news /ask and return a context string. Returns None on any failure.
+
+    Results are cached for 15 minutes keyed by a hash of the query, so concurrent
+    sessions asking about the same market event reuse the same news fetch.
+    """
+    cache_key = hashlib.md5(query.encode()).hexdigest()
+    cached = _news_context_cache.get(cache_key)
+    if cached is not None:
+        logger.info("News context cache hit for session='%s' (query hash=%s)", session_id, cache_key[:8])
+        return cached
+
     try:
         client = _get_news_client()
         resp = await client.post(
@@ -335,8 +351,10 @@ async def _fetch_news_context(query: str, session_id: str) -> str | None:
         resp.raise_for_status()
         news = resp.json().get("response", "").strip()
         if news:
+            result = f"LIVE NEWS CONTEXT (from agent-news):\n{news}"
+            _news_context_cache[cache_key] = result
             logger.info("Fetched news context (%d chars) for session='%s'", len(news), session_id)
-            return f"LIVE NEWS CONTEXT (from agent-news):\n{news}"
+            return result
     except httpx.TimeoutException:
         logger.warning("News agent timed out for session='%s'", session_id)
     except Exception as e:
