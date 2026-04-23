@@ -2,6 +2,7 @@ import asyncio
 import logging
 import json
 import os
+import re
 import uuid
 from contextlib import asynccontextmanager
 from datetime import date as _date, datetime, timezone
@@ -405,7 +406,7 @@ class SessionsHistoryRequest(BaseModel):
 @limiter.limit("30/minute")
 async def get_history_by_sessions(request: Request, body: SessionsHistoryRequest):
     user_id = request.headers.get("X-User-Id") or None
-    safe_ids = [s for s in body.session_ids[:20] if isinstance(s, str) and s.isalnum() and len(s) <= 64]
+    safe_ids = [s for s in body.session_ids[:20] if isinstance(s, str) and re.match(r'^[a-zA-Z0-9\-]{1,64}$', s)]
     logger.info("POST /history/sessions — %d session(s)", len(safe_ids))
     history = await MongoDB.get_history_by_sessions(safe_ids, user_id=user_id)
     return {"history": history}
