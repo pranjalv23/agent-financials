@@ -6,6 +6,7 @@ import re
 import uuid
 from contextlib import asynccontextmanager
 from datetime import date as _date, datetime, timezone
+from cachetools import TTLCache
 
 import uvicorn
 import yfinance as yf
@@ -430,6 +431,69 @@ async def get_chart_data(ticker: str, period: str = "1y"):
     except RuntimeError as e:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
     return data
+
+
+# ── Quotes Endpoint ──
+
+_SYMBOL_MAP: dict[str, str] = {
+    "NIFTY 50":  "^NSEI",
+    "SENSEX":    "^BSESN",
+    "RELIANCE":  "RELIANCE.NS",
+    "TCS":       "TCS.NS",
+    "HDFC BANK": "HDFCBANK.NS",
+    "INFOSYS":   "INFY.NS",
+    "WIPRO":     "WIPRO.NS",
+    "BAJAJ FIN": "BAJFINANCE.NS",
+}
+
+# keyed on frozenset of requested display names; 60-second TTL
+_quotes_cache: TTLCache = TTLCache(maxsize=32, ttl=60)
+
+
+def _format_value(price: float, symbol: str) -> str:
+    """Format price with ₹ prefix for INR symbols, plain number for indices."""
+    if symbol.startswith("^"):
+        return f"{price:,.0f}"
+    return f"₹{price:,.2f}"
+
+
+def _fetch_quotes_sync(display_names: list[str]) -> list[dict]:
+    results = []
+    for name in display_names:
+        yf_symbol = _SYMBOL_MAP.get(name)
+        if not yf_symbol:
+            logger.warning("No yfinance mapping for symbol '%s'", name)
+            continue
+        try:
+            fi = yf.Ticker(yf_symbol).fast_info
+            price = float(fi.last_price) if fi.last_price else None
+            prev = float(fi.previous_close) if fi.previous_close else None
+            if price is None:
+                continue
+            change_pct = ((price - prev) / prev * 100) if prev else 0.0
+            results.append({
+                "symbol": name,
+                "value": _format_value(price, yf_symbol),
+                "change": f"{'+' if change_pct >= 0 else ''}{change_pct:.2f}%",
+                "positive": change_pct >= 0,
+            })
+        except Exception as e:
+            logger.warning("Quote fetch failed for '%s' (%s): %s", name, yf_symbol, e)
+    return results
+
+
+@app.get("/quotes")
+async def get_quotes(symbols: str = ""):
+    """Return current price + daily change for a comma-separated list of display-name symbols.
+    Results are cached for 60 seconds. No auth required."""
+    requested = [s.strip() for s in symbols.split(",") if s.strip()] if symbols else list(_SYMBOL_MAP)
+    cache_key = frozenset(requested)
+    if cache_key in _quotes_cache:
+        return {"quotes": _quotes_cache[cache_key], "cached": True}
+    quotes = await asyncio.to_thread(_fetch_quotes_sync, requested)
+    _quotes_cache[cache_key] = quotes
+    return {"quotes": quotes, "cached": False}
+
 
 # ── Profile Endpoints ──
 
