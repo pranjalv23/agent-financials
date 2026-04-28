@@ -3,7 +3,6 @@ load_akv_secrets()
 
 import asyncio
 import logging
-import json
 import os
 from contextlib import asynccontextmanager
 from datetime import date as _date, datetime, timezone
@@ -12,21 +11,19 @@ from cachetools import TTLCache
 import uvicorn
 import yfinance as yf
 from fastapi import FastAPI, HTTPException, Request, status
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response, StreamingResponse, JSONResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from agent_sdk.logging import configure_logging
-from agent_sdk.middleware.infra import RequestIDMiddleware, SecurityHeadersMiddleware, VerifyInternalKeyMiddleware
 from agent_sdk.utils.env import validate_required_env_vars
 from agent_sdk.utils.validation import SAFE_SESSION_RE
-from agent_sdk.server.error_handlers import register_error_handlers
 from agent_sdk.metrics import metrics_response
-from agents.agent import _agent_instances, get_agent, run_query, create_stream, save_memory, get_session_lock, _news_client
-from agent_sdk.database.memory import _get_client as _get_mem0_client
+from agent_sdk.server.app_factory import create_agent_app
+from agent_sdk.server.models import HistoryResponse, SessionsHistoryRequest
+from agent_sdk.server.sse import create_sse_stream
+from agent_sdk.server.session import verify_session_ownership
+from agents.agent import _agent_instances, get_agent, run_query, create_stream, save_memory, _news_client
 from database.mongo import MongoDB
 from database.profile import ONBOARDING_QUESTIONS, VALID_RISK_TOLERANCES, VALID_GOALS, VALID_KNOWLEDGE_LEVELS
 from a2a_service.server import create_a2a_app
@@ -35,13 +32,12 @@ from charts.data import fetch_chart_data, VALID_PERIODS
 configure_logging("agent_financials")
 logger = logging.getLogger("agent_financials.api")
 
-def get_remote_address_or_user(request: Request) -> str:
+
+def _get_remote_address_or_user(request: Request) -> str:
     user_id = request.headers.get("X-User-Id")
     if user_id:
         return f"user:{user_id}"
     return get_remote_address(request)
-
-limiter = Limiter(key_func=get_remote_address_or_user)
 
 
 @asynccontextmanager
@@ -77,30 +73,8 @@ async def lifespan(app: FastAPI):
     logger.info("Shutdown complete")
 
 
-app = FastAPI(
-    title="Financial Agent API",
-    description="Ask investing questions, analyze stocks, and get AI-powered financial market insights.",
-    lifespan=lifespan,
-)
+app, limiter = create_agent_app("Financial Agent API", lifespan, key_func=_get_remote_address_or_user)
 
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-register_error_handlers(app)
-
-_raw_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:5173")
-_allowed_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_allowed_origins,
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "X-Internal-API-Key", "X-User-Id", "X-Request-ID"],
-)
-app.add_middleware(SecurityHeadersMiddleware)
-app.add_middleware(RequestIDMiddleware)
-app.add_middleware(VerifyInternalKeyMiddleware)
-
-# Mount the A2A server as a sub-application
 a2a_app = create_a2a_app()
 app.mount("/a2a", a2a_app.build())
 
@@ -195,11 +169,6 @@ class AskResponse(BaseModel):
     structured: dict | None = None
 
 
-class HistoryResponse(BaseModel):
-    session_id: str
-    history: list[dict]
-
-
 # ── Agent endpoints ──
 
 @app.post("/ask", response_model=AskResponse)
@@ -209,12 +178,8 @@ async def ask(body: AskRequest, request: Request):
     is_new = body.session_id is None
     session_id = body.session_id or MongoDB.generate_session_id()
 
-    if not is_new and user_id:
-        owned_history = await MongoDB.get_history(session_id, user_id=user_id)
-        if not owned_history:
-            any_history = await MongoDB.get_history(session_id)
-            if any_history:
-                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+    if not is_new:
+        await verify_session_ownership(session_id, user_id, MongoDB)
 
     logger.info("POST /ask — session='%s' (%s), user='%s', query='%s'",
                 session_id, "new" if is_new else "existing", user_id or "anonymous", body.query[:100])
@@ -250,116 +215,28 @@ async def ask_stream(body: AskRequest, request: Request):
     is_new = body.session_id is None
     session_id = body.session_id or MongoDB.generate_session_id()
 
-    if not is_new and user_id:
-        owned_history = await MongoDB.get_history(session_id, user_id=user_id)
-        if not owned_history:
-            any_history = await MongoDB.get_history(session_id)
-            if any_history:
-                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+    if not is_new:
+        await verify_session_ownership(session_id, user_id, MongoDB)
+
     logger.info("POST /ask/stream — session='%s', user='%s', query='%s'",
                 session_id, user_id or "anonymous", body.query[:100])
 
     stream = await create_stream(body.query, session_id=session_id,
-                           response_format=body.response_format, model_id=body.model_id,
-                           mode=body.mode, user_id=user_id,
-                           watchlist_id=body.watchlist_id, as_of_date=body.as_of_date)
+                                 response_format=body.response_format, model_id=body.model_id,
+                                 mode=body.mode, user_id=user_id,
+                                 watchlist_id=body.watchlist_id, as_of_date=body.as_of_date)
 
-    _STREAM_TIMEOUT = float(os.getenv("STREAM_TIMEOUT_SECONDS", "600"))
-    _PROGRESS_PREFIX = "__PROGRESS__:"
+    async def _on_complete(response_text: str, steps: list, plan: str | None) -> None:
+        save_memory(user_id=user_id or session_id, query=body.query, response=response_text)
+        await MongoDB.save_conversation(
+            session_id=session_id, query=body.query, response=response_text,
+            steps=steps, user_id=user_id, plan=plan,
+        )
 
-    async def event_stream():
-        full_response = []
-        queue = asyncio.Queue(maxsize=100)
-        _HEARTBEAT_INTERVAL = 15.0  # seconds
-
-        async def heartbeat_worker():
-            """Send periodic SSE comments to keep the connection alive."""
-            try:
-                while True:
-                    await asyncio.sleep(_HEARTBEAT_INTERVAL)
-                    # SSE comment (ignored by UI, keeps connection warm)
-                    await queue.put(f": heartbeat {int(asyncio.get_running_loop().time())}\n\n")
-            except asyncio.CancelledError:
-                pass
-
-        async def agent_worker():
-            """Run the agent stream and push chunks/events to the queue."""
-            try:
-                async with get_session_lock(session_id):
-                    async with asyncio.timeout(_STREAM_TIMEOUT):
-                        async for chunk in stream:
-                            try:
-                                await asyncio.wait_for(queue.put(chunk), timeout=30.0)
-                            except asyncio.TimeoutError:
-                                logger.warning("Stream queue full for session='%s' — client likely disconnected", session_id)
-                                return
-            except TimeoutError:
-                logger.error("Stream timed out after %.0fs for session='%s'", _STREAM_TIMEOUT, session_id)
-                await queue.put(f"__ERROR__:Response timed out after {_STREAM_TIMEOUT:.0f} seconds.")
-            except Exception as e:
-                logger.error("Stream failed: %s", e, exc_info=True)
-                await queue.put("__ERROR__:An internal error occurred while generating the response.")
-            finally:
-                # Signal completion to the main consumer
-                try:
-                    queue.put_nowait(None)
-                except asyncio.QueueFull:
-                    pass
-
-        # Start workers
-        heartbeat_task = asyncio.create_task(heartbeat_worker())
-        agent_task = asyncio.create_task(agent_worker())
-
-        try:
-            while True:
-                chunk = await queue.get()
-                if chunk is None:
-                    break
-
-                if isinstance(chunk, str):
-                    if chunk.startswith(_PROGRESS_PREFIX):
-                        label = chunk[len(_PROGRESS_PREFIX):]
-                        yield f"event: progress\ndata: {json.dumps({'phase': label})}\n\n"
-                    elif chunk.startswith("__ERROR__:"):
-                        error_msg = chunk[len("__ERROR__:"):]
-                        yield f"event: error\ndata: {json.dumps({'message': error_msg})}\n\n"
-                        fallback = f"\n\n[{error_msg}]"
-                        yield f"data: {json.dumps({'text': fallback})}\n\n"
-                        full_response.append(fallback)
-                    elif chunk.startswith(": heartbeat"):
-                        yield chunk
-                    else:
-                        full_response.append(chunk)
-                        yield f"data: {json.dumps({'text': chunk})}\n\n"
-
-            # Final persistence and metadata
-            response_text = "".join(full_response)
-            if not response_text.strip():
-                fallback = "Sorry, the model returned an empty response. Please try again."
-                yield f"data: {json.dumps({'text': fallback})}\n\n"
-                response_text = fallback
-
-            try:
-                save_memory(user_id=user_id or session_id, query=body.query, response=response_text)
-                await MongoDB.save_conversation(
-                    session_id=session_id, query=body.query, response=response_text,
-                    steps=stream.steps, user_id=user_id, plan=stream.plan,
-                )
-            except Exception as e:
-                logger.error("Failed to save conversation: %s", e)
-
-            yield f"data: {json.dumps({'session_id': session_id})}\n\n"
-
-        finally:
-            heartbeat_task.cancel()
-            agent_task.cancel()
-            try:
-                await agent_task
-            except asyncio.CancelledError:
-                pass
-            yield "data: [DONE]\n\n"
-
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return StreamingResponse(
+        create_sse_stream(stream, session_id=session_id, query=body.query, on_complete=_on_complete),
+        media_type="text/event-stream",
+    )
 
 
 @app.get("/history/user/me", response_model=HistoryResponse)
@@ -382,10 +259,6 @@ async def get_history(request: Request, session_id: str):
     history = await MongoDB.get_history(session_id, user_id=user_id)
     logger.info("Returning %d history entries for session='%s'", len(history), session_id)
     return HistoryResponse(session_id=session_id, history=history)
-
-
-class SessionsHistoryRequest(BaseModel):
-    session_ids: list[str]
 
 
 @app.post("/history/sessions")

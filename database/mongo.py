@@ -2,16 +2,16 @@ import logging
 import os
 from datetime import datetime, timezone
 
-from motor.motor_asyncio import AsyncIOMotorGridFSBucket
+from bson import ObjectId
 from agent_sdk.database.mongo import BaseMongoDatabase
+from agent_sdk.database.gridfs_mixin import GridFSMixin
 
 logger = logging.getLogger("agent_financials.mongo")
 
 _DB_NAME = os.getenv("MONGO_DB_NAME", "agent_financials")
 
 
-class MongoDB(BaseMongoDatabase):
-    _gridfs: AsyncIOMotorGridFSBucket | None = None
+class MongoDB(GridFSMixin, BaseMongoDatabase):
 
     @classmethod
     def db_name(cls) -> str:
@@ -20,12 +20,6 @@ class MongoDB(BaseMongoDatabase):
     @classmethod
     def _db(cls):
         return cls.get_client()[cls.db_name()]
-
-    @classmethod
-    def _gridfs_bucket(cls) -> AsyncIOMotorGridFSBucket:
-        if cls._gridfs is None:
-            cls._gridfs = AsyncIOMotorGridFSBucket(cls._db())
-        return cls._gridfs
 
     @classmethod
     def _files(cls):
@@ -95,7 +89,6 @@ class MongoDB(BaseMongoDatabase):
 
     @classmethod
     async def get_watchlist(cls, user_id: str, watchlist_id: str) -> dict | None:
-        from bson import ObjectId
         try:
             val = ObjectId(watchlist_id)
         except Exception:
@@ -107,7 +100,6 @@ class MongoDB(BaseMongoDatabase):
 
     @classmethod
     async def update_watchlist(cls, user_id: str, watchlist_id: str, name: str | None = None, tickers: list | None = None) -> bool:
-        from bson import ObjectId
         updates = {"updated_at": datetime.now(timezone.utc)}
         if name is not None:
             updates["name"] = name
@@ -125,7 +117,6 @@ class MongoDB(BaseMongoDatabase):
 
     @classmethod
     async def delete_watchlist(cls, user_id: str, watchlist_id: str) -> bool:
-        from bson import ObjectId
         try:
             val = ObjectId(watchlist_id)
         except Exception:
@@ -159,7 +150,6 @@ class MongoDB(BaseMongoDatabase):
 
     @classmethod
     async def update_holding(cls, user_id: str, holding_id: str, quantity: float | None = None, avg_buy_price: float | None = None) -> bool:
-        from bson import ObjectId
         updates = {"updated_at": datetime.now(timezone.utc)}
         if quantity is not None:
             updates["quantity"] = quantity
@@ -177,48 +167,12 @@ class MongoDB(BaseMongoDatabase):
 
     @classmethod
     async def delete_holding(cls, user_id: str, holding_id: str) -> bool:
-        from bson import ObjectId
         try:
             val = ObjectId(holding_id)
         except Exception:
             return False
         result = await cls.holdings_collection().delete_one({"_id": val, "user_id": user_id})
         return result.deleted_count > 0
-
-    @classmethod
-    async def store_file(
-        cls,
-        file_id: str,
-        filename: str,
-        data: bytes,
-        file_type: str,
-        session_id: str | None = None,
-        user_id: str | None = None,
-    ) -> None:
-        bucket = cls._gridfs_bucket()
-        await bucket.upload_from_stream(
-            file_id,
-            data,
-            metadata={"file_id": file_id, "original_filename": filename,
-                       "file_type": file_type, "session_id": session_id, "user_id": user_id},
-        )
-        await cls._files().insert_one({
-            "file_id": file_id, "filename": filename, "file_type": file_type,
-            "session_id": session_id, "user_id": user_id,
-            "created_at": datetime.now(timezone.utc),
-        })
-
-    @classmethod
-    async def retrieve_file(cls, file_id: str) -> tuple[bytes, dict] | None:
-        bucket = cls._gridfs_bucket()
-        try:
-            stream = await bucket.open_download_stream_by_name(file_id)
-            data = await stream.read()
-            meta = await cls._files().find_one({"file_id": file_id}, {"_id": 0})
-            return data, meta or {}
-        except Exception:
-            logger.warning("File not found in GridFS: file_id='%s'", file_id)
-            return None
 
     @classmethod
     async def ensure_indexes(cls) -> None:

@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 import httpx
 from cachetools import TTLCache
 from agent_sdk.agents import BaseAgent
-from agent_sdk.checkpoint import AsyncMongoDBSaver
+from agent_sdk.checkpoint import get_default_checkpointer
 from agent_sdk.database.memory import get_memories, save_memory
 from agent_sdk.memory import SemanticMemoryManager
 from database.mongo import MongoDB
@@ -170,7 +170,6 @@ MCP_SERVERS = {
 }
 
 _agent_instances: dict[str, BaseAgent] = {}
-_checkpointer: AsyncMongoDBSaver | None = None
 _semantic_memory: SemanticMemoryManager | None = None
 
 
@@ -281,17 +280,6 @@ def _get_news_client() -> httpx.AsyncClient:
     return _news_client
 
 
-def _get_checkpointer() -> AsyncMongoDBSaver:
-    global _checkpointer
-    if _checkpointer is None:
-        _checkpointer = AsyncMongoDBSaver.from_conn_string(
-            conn_string=os.getenv("MONGO_URI", "mongodb://localhost:27017"),
-            db_name=os.getenv("MONGO_DB_NAME", "agent_financials"),
-            ttl=int(os.getenv("CHECKPOINT_TTL_SECONDS", str(7 * 24 * 3600))),
-        )
-    return _checkpointer
-
-
 def get_agent(mode: str = "financial_analyst") -> BaseAgent:
     """Return a per-mode singleton BaseAgent so the checkpointer persists across calls."""
     if mode not in _agent_instances:
@@ -301,7 +289,7 @@ def get_agent(mode: str = "financial_analyst") -> BaseAgent:
             mcp_servers=MCP_SERVERS,
             system_prompt=SYSTEM_PROMPT,
             provider="azure",
-            checkpointer=_get_checkpointer(),
+            checkpointer=get_default_checkpointer(os.getenv("MONGO_DB_NAME", "agent_financials")),
             mode=mode,
             streaming_nodes=None,  # Defaults to DEFAULT_STREAMING_NODES (all phases)
             semantic_memory=_get_semantic_memory(),
@@ -542,7 +530,7 @@ async def run_query(query: str, session_id: str = "default",
         )
     logger.info("run_query finished — session='%s', steps: %d", session_id, len(result["steps"]))
 
-    asyncio.get_event_loop().create_task(
+    asyncio.create_task(
         asyncio.to_thread(save_memory, user_id=user_id or session_id, query=query, response=result["response"])
     )
 
@@ -619,7 +607,7 @@ async def stream_for_a2a(query: str, *, session_id: str = "default",
         session_id, len(stream.steps), len(response_text),
     )
 
-    asyncio.get_event_loop().create_task(
+    asyncio.create_task(
         asyncio.to_thread(save_memory, user_id=user_id or session_id, query=query, response=response_text)
     )
     try:
